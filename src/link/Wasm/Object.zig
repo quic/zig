@@ -101,14 +101,14 @@ pub const Symbol = struct {
         function: Wasm.ObjectFunctionIndex,
         function_import: ScratchSpace.FuncImportIndex,
         data: struct {
-            segment_index: Wasm.ObjectSegmentIndex,
+            segment_index: Wasm.DataSegment.Index,
             segment_offset: u32,
             size: u32,
         },
         data_import: void,
         global: Wasm.ObjectGlobalIndex,
         global_import: Wasm.ObjectGlobalImportIndex,
-        section: Wasm.SectionIndex,
+        section: Wasm.ObjectSectionIndex,
         table: Wasm.ObjectTableIndex,
         table_import: Wasm.ObjectTableImportIndex,
     };

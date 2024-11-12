@@ -3,7 +3,7 @@
 
 const Flush = @This();
 const Wasm = @import("../Wasm.zig");
-const Object = @import("../Object.zig");
+const Object = @import("Object.zig");
 const Zcu = @import("../../Zcu.zig");
 const Alignment = Wasm.Alignment;
 const String = Wasm.String;
@@ -39,6 +39,10 @@ binary_bytes: std.ArrayListUnmanaged(u8) = .empty,
 /// Empty when outputting an object.
 function_exports: std.ArrayListUnmanaged(FunctionIndex) = .empty,
 global_exports: std.ArrayListUnmanaged(GlobalIndex) = .empty,
+
+/// Tracks whether this is the first flush or subsequent flush.
+/// This flag is not reset during `clear`.
+subsequent: bool = false,
 
 /// 0. Index into `data_segments`.
 const DataSegmentIndex = enum(u32) {
@@ -139,6 +143,13 @@ pub fn finish(f: *Flush, wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id) a
     }
 
     if (diags.hasErrors()) return error.LinkFailure;
+
+    if (f.subsequent) {
+        // Reset garbage collection state.
+        for (wasm.object_function_imports.values()) |*import| import.flags.alive = false;
+        for (wasm.object_global_imports.values()) |*import| import.flags.alive = false;
+        for (wasm.object_table_imports.values()) |*import| import.flags.alive = false;
+    }
 
     // These loops do both recursive marking of alive symbols well as checking for undefined symbols.
     // At the end, output_functions and output_globals will be populated.

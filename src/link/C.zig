@@ -371,7 +371,7 @@ pub fn updateNav(self: *C, pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) !
     gop.value_ptr.fwd_decl = try self.addString(object.dg.fwd_decl.items);
 }
 
-pub fn flush(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) !void {
+pub fn flush(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) link.File.FlushError!void {
     return self.flushModule(arena, tid, prog_node);
 }
 
@@ -390,7 +390,7 @@ fn abiDefines(self: *C, target: std.Target) !std.ArrayList(u8) {
     return defines;
 }
 
-pub fn flushModule(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) !void {
+pub fn flushModule(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) link.File.FlushError!void {
     _ = arena; // Has the same lifetime as the call to Compilation.update.
 
     const tracy = trace(@src());
@@ -400,6 +400,7 @@ pub fn flushModule(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node:
     defer sub_prog_node.end();
 
     const comp = self.base.comp;
+    const diags = &comp.link_diags;
     const gpa = comp.gpa;
     const zcu = self.base.comp.zcu.?;
     const ip = &zcu.intern_pool;
@@ -536,8 +537,10 @@ pub fn flushModule(self: *C, arena: Allocator, tid: Zcu.PerThread.Id, prog_node:
     );
 
     const file = self.base.file.?;
-    try file.setEndPos(f.file_size);
-    try file.pwritevAll(f.all_buffers.items, 0);
+    file.setEndPos(f.file_size) catch |err| return diags.fail("failed to allocate file: {s}", .{@errorName(err)});
+    file.pwritevAll(f.all_buffers.items, 0) catch |err| return diags.fail("failed to write to '{'}': {s}", .{
+        self.base.emit, @errorName(err),
+    });
 }
 
 const Flush = struct {

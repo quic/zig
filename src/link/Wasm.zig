@@ -2,7 +2,6 @@ const Wasm = @This();
 const Archive = @import("Wasm/Archive.zig");
 const Object = @import("Wasm/Object.zig");
 const Flush = @import("Wasm/Flush.zig");
-const ZigObject = @import("Wasm/ZigObject.zig");
 
 const builtin = @import("builtin");
 const native_endian = builtin.cpu.arch.endian();
@@ -104,14 +103,14 @@ relocations: std.MultiArrayList(Relocation) = .empty,
 /// Non-synthetic section that can essentially be mem-cpy'd into place after performing relocations.
 object_data_segments: std.ArrayListUnmanaged(DataSegment) = .empty,
 /// Non-synthetic section that can essentially be mem-cpy'd into place after performing relocations.
-object_custom_segments: std.AutoArrayHashMapUnmanaged(InputSectionIndex, CustomSegment) = .empty,
+object_custom_segments: std.AutoArrayHashMapUnmanaged(ObjectSectionIndex, CustomSegment) = .empty,
 
 /// All comdat information for all objects.
 object_comdats: std.ArrayListUnmanaged(Comdat) = .empty,
 /// A table that maps the relocations to be performed where the key represents
 /// the section (across all objects) that the slice of relocations applies to.
-object_relocations_table: std.AutoArrayHashMapUnmanaged(InputSectionIndex, Relocation.Slice) = .empty,
-/// Incremented across all objects in order to enable calculation of `InputSectionIndex` values.
+object_relocations_table: std.AutoArrayHashMapUnmanaged(ObjectSectionIndex, Relocation.Slice) = .empty,
+/// Incremented across all objects in order to enable calculation of `ObjectSectionIndex` values.
 object_total_sections: u32 = 0,
 /// All comdat symbols from all objects concatenated.
 object_comdat_symbols: std.MultiArrayList(Comdat.Symbol) = .empty,
@@ -141,28 +140,10 @@ nav_exports: std.AutoArrayHashMapUnmanaged(NavExport, Zcu.Export.Index) = .empty
 uav_exports: std.AutoArrayHashMapUnmanaged(UavExport, Zcu.Export.Index) = .empty,
 imports: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, void) = .empty,
 
-/// During the pre-link phase, the `function_imports` field of Wasm contains
-/// all the functions that remain undefined after processing all the linker
-/// inputs. These could be resolved to functions defined by ZigObject, or if no
-/// such function is present, they will be emitted into the import section.
-///
-/// This integer tracks the end position of that `function_imports` field after
-/// the pre-link phase but before any ZigObject functions are generated. This
-/// way, that same map can be used to store additional function imports needed
-/// by the ZigObject, while retaining the ability to restore state back to end
-/// of the pre-link phase.
-function_import_start: u32,
-/// Same as `function_import_start` but for global imports.
-global_import_start: u32,
-/// Same as `function_import_start` but for output globals.
-global_start: u32,
-/// Same as `function_import_start` but for relocations
-relocs_start: u32,
-
 dwarf: ?Dwarf = null,
-debug_sections: DebugSections,
+debug_sections: DebugSections = .{},
 
-flush_buffer: Flush = .init,
+flush_buffer: Flush = .{},
 
 /// The first N indexes correspond to input objects (`objects`) array.
 /// After that, the indexes correspond to the `source_locations` array,
@@ -209,7 +190,7 @@ pub const SymbolFlags = packed struct(u32) {
 
     // Above here matches the tooling conventions ABI.
 
-    padding1: u7 = 0,
+    padding1: u8 = 0,
     /// Zig-specific. Dead things are allowed to be garbage collected.
     alive: bool = false,
     /// Zig-specific. Segments only. Signals that the segment contains only
@@ -302,12 +283,12 @@ pub const Nav = extern struct {
     pub const Index = enum(u32) {
         _,
 
-        pub fn key(i: @This(), zo: *const ZigObject) *InternPool.Nav.Index {
-            return &zo.navs.keys()[@intFromEnum(i)];
+        pub fn key(i: @This(), wasm: *const Wasm) *InternPool.Nav.Index {
+            return &wasm.navs.keys()[@intFromEnum(i)];
         }
 
-        pub fn value(i: @This(), zo: *const ZigObject) *Nav {
-            return &zo.navs.values()[@intFromEnum(i)];
+        pub fn value(i: @This(), wasm: *const Wasm) *Nav {
+            return &wasm.navs.values()[@intFromEnum(i)];
         }
     };
 };
@@ -323,14 +304,14 @@ pub const UavExport = extern struct {
 };
 
 const DebugSections = struct {
-    abbrev: DebugSection,
-    info: DebugSection,
-    line: DebugSection,
-    loc: DebugSection,
-    pubnames: DebugSection,
-    pubtypes: DebugSection,
-    ranges: DebugSection,
-    str: DebugSection,
+    abbrev: DebugSection = .{},
+    info: DebugSection = .{},
+    line: DebugSection = .{},
+    loc: DebugSection = .{},
+    pubnames: DebugSection = .{},
+    pubtypes: DebugSection = .{},
+    ranges: DebugSection = .{},
+    str: DebugSection = .{},
 };
 
 const DebugSection = struct {};
@@ -369,7 +350,7 @@ pub const Function = extern struct {
     code: Code,
     /// The offset within the section where the data starts.
     offset: u32,
-    section_index: InputSectionIndex,
+    section_index: ObjectSectionIndex,
     source_location: SourceLocation,
 
     pub const Code = DataSegment.Payload;
@@ -467,7 +448,7 @@ pub const Table = extern struct {
 
 /// Uniquely identifies a section across all objects. Each Object has a section_start field.
 /// By subtracting that value from this one, the Object section index is obtained.
-pub const InputSectionIndex = enum(u32) {
+pub const ObjectSectionIndex = enum(u32) {
     _,
 };
 
@@ -542,7 +523,7 @@ pub const DataSegment = extern struct {
     payload: Payload,
     /// From the data segment start to the first byte of payload.
     segment_offset: u32,
-    section_index: InputSectionIndex,
+    section_index: ObjectSectionIndex,
 
     pub const Payload = extern struct {
         /// Points into string_bytes. No corresponding string_table entry.
@@ -718,7 +699,7 @@ pub const Relocation = struct {
     pub const Pointee = union {
         symbol_name: String,
         type_index: FunctionType.Index,
-        section: InputSectionIndex,
+        section: ObjectSectionIndex,
     };
 
     pub const Slice = extern struct {
@@ -911,7 +892,6 @@ pub fn createEmpty(
     emit: Path,
     options: link.File.OpenOptions,
 ) !*Wasm {
-    const gpa = comp.gpa;
     const target = comp.root_mod.resolved_target.result;
     assert(target.ofmt == .wasm);
 
@@ -965,7 +945,6 @@ pub fn createEmpty(
         .max_memory = options.max_memory,
 
         .entry_name = undefined,
-        .zig_object = null,
         .dump_argv_list = .empty,
         .host_name = undefined,
         .preloaded_strings = undefined,
@@ -1010,20 +989,6 @@ pub fn createEmpty(
             0,
     });
     wasm.name = sub_path;
-
-    if (comp.zcu) |zcu| {
-        if (!use_llvm) {
-            const zig_object = try arena.create(ZigObject);
-            wasm.zig_object = zig_object;
-            zig_object.* = .{
-                .path = .{
-                    .root_dir = std.Build.Cache.Directory.cwd(),
-                    .sub_path = try std.fmt.allocPrint(gpa, "{s}.o", .{fs.path.stem(zcu.main_mod.root_src_path)}),
-                },
-                .stack_pointer_sym = undefined,
-            };
-        }
-    }
 
     return wasm;
 }
@@ -1118,18 +1083,18 @@ pub fn deinit(wasm: *Wasm) void {
 
     if (wasm.dwarf) |*dwarf| dwarf.deinit();
 
-    wasm.objects.deinit(gpa);
+    wasm.object_function_imports.deinit(gpa);
+    wasm.object_functions.deinit(gpa);
+    wasm.object_global_imports.deinit(gpa);
+    wasm.object_globals.deinit(gpa);
+    wasm.object_table_imports.deinit(gpa);
+    wasm.object_tables.deinit(gpa);
+    wasm.object_memory_imports.deinit(gpa);
+    wasm.object_memories.deinit(gpa);
+
     wasm.object_data_segments.deinit(gpa);
     wasm.object_relocatable_codes.deinit(gpa);
     wasm.object_custom_segments.deinit(gpa);
-    wasm.object_function_imports.deinit(gpa);
-    wasm.object_table_imports.deinit(gpa);
-    wasm.object_memory_imports.deinit(gpa);
-    wasm.object_global_imports.deinit(gpa);
-    wasm.object_functions.deinit(gpa);
-    wasm.object_tables.deinit(gpa);
-    wasm.object_memories.deinit(gpa);
-    wasm.object_globals.deinit(gpa);
     wasm.object_symbols.deinit(gpa);
     wasm.object_named_segments.deinit(gpa);
     wasm.object_init_funcs.deinit(gpa);
@@ -1137,6 +1102,7 @@ pub fn deinit(wasm: *Wasm) void {
     wasm.object_relocations.deinit(gpa);
     wasm.object_relocations_table.deinit(gpa);
     wasm.object_comdat_symbols.deinit(gpa);
+    wasm.objects.deinit(gpa);
 
     wasm.atoms.deinit(gpa);
 
@@ -1147,7 +1113,6 @@ pub fn deinit(wasm: *Wasm) void {
     wasm.segments.deinit(gpa);
     wasm.segment_info.deinit(gpa);
 
-    wasm.function_imports.deinit(gpa);
     wasm.global_imports.deinit(gpa);
     wasm.func_types.deinit(gpa);
     wasm.functions.deinit(gpa);
@@ -1395,16 +1360,14 @@ pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) anyerror!void {
         mem.sortUnstable(InitFunc, wasm.object_init_funcs.items, {}, InitFunc.lessThan);
         try wasm.initializeCallCtorsFunction();
     }
-
-    if (wasm.zig_object) |zo| {
-        zo.function_import_start = @intCast(wasm.function_imports.count());
-        zo.global_import_start = @intCast(wasm.global_imports.count());
-        zo.global_start = @intCast(wasm.output_globals.items.len);
-        assert(wasm.output_globals.items.len == wasm.global_names.count());
-    }
 }
 
-pub fn flushModule(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) anyerror!void {
+pub fn flushModule(
+    wasm: *Wasm,
+    arena: Allocator,
+    tid: Zcu.PerThread.Id,
+    prog_node: std.Progress.Node,
+) link.File.FlushError!void {
     const comp = wasm.base.comp;
     const use_lld = build_options.have_llvm and comp.config.use_lld;
 
@@ -1434,6 +1397,7 @@ pub fn flushModule(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_no
     defer sub_prog_node.end();
 
     wasm.flush_buffer.clear();
+    defer wasm.flush_buffer.subsequent = true;
     return wasm.flush_buffer.finish(wasm, arena, tid);
 }
 
