@@ -173,6 +173,14 @@ pub fn finish(f: *Flush, wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id) a
     }
     if (diags.hasErrors()) return error.LinkFailure;
 
+    // TODO only include init functions for objects with must_link=true or
+    // which have any alive functions inside them.
+    if (wasm.object_init_funcs.items.len > 0) {
+        // Zig has no constructors so these are only for object file inputs.
+        mem.sortUnstable(Wasm.InitFunc, wasm.object_init_funcs.items, {}, Wasm.InitFunc.lessThan);
+        try f.functions.put(gpa, .__wasm_call_ctors, {});
+    }
+
     var any_passive_inits = false;
 
     // Merge and order the data segments. Depends on garbage collection so that

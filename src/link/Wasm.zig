@@ -1348,18 +1348,14 @@ pub fn flush(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: st
     return wasm.flushModule(arena, tid, prog_node);
 }
 
-pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) anyerror!void {
+pub fn prelink(wasm: *Wasm, prog_node: std.Progress.Node) link.File.FlushError!void {
     const tracy = trace(@src());
     defer tracy.end();
 
     const sub_prog_node = prog_node.start("Wasm Prelink", 0);
     defer sub_prog_node.end();
 
-    if (wasm.object_init_funcs.items.len > 0) {
-        // Zig has no constructors so these are only for object file inputs.
-        mem.sortUnstable(InitFunc, wasm.object_init_funcs.items, {}, InitFunc.lessThan);
-        try wasm.initializeCallCtorsFunction();
-    }
+    _ = wasm;
 }
 
 pub fn flushModule(
@@ -1379,7 +1375,7 @@ pub fn flushModule(
     if (comp.verbose_link) Compilation.dump_argv(wasm.dump_argv_list.items);
 
     if (wasm.base.zcu_object_sub_path) |path| {
-        const module_obj_path = .{
+        const module_obj_path: Path = .{
             .root_dir = wasm.base.emit.root_dir,
             .sub_path = if (fs.path.dirname(wasm.base.emit.sub_path)) |dirname|
                 try fs.path.join(arena, &.{ dirname, path })
