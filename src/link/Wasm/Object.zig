@@ -32,10 +32,8 @@ functions: RelativeSlice,
 globals_imports: RelativeSlice,
 /// Points into Wasm object_tables_imports
 tables_imports: RelativeSlice,
-/// Points into Wasm object_relocatable_datas
-relocatable_data: RelativeSlice,
-/// Points into Wasm object_relocatable_customs
-relocatable_custom: RelativeSlice,
+/// Points into Wasm object_custom_segments
+custom_segments: RelativeSlice,
 /// For calculating local section index from `Wasm.SectionIndex`.
 local_section_index_base: u32,
 /// Points into Wasm object_init_funcs
@@ -73,6 +71,15 @@ pub const FunctionImport = struct {
     module_name: Wasm.String,
     name: Wasm.String,
     function_index: ScratchSpace.FuncTypeIndex,
+};
+
+pub const DataSegmentFlags = enum(u32) { active, passive, active_memidx };
+
+pub const SubsectionType = enum(u8) {
+    segment_info = 5,
+    init_funcs = 6,
+    comdat_info = 7,
+    symbol_table = 8,
 };
 
 pub const Symbol = struct {
@@ -158,6 +165,7 @@ fn parse(
     host_name: Wasm.String,
     ss: *ScratchSpace,
     must_link: bool,
+    gc_sections: bool,
 ) anyerror!Object {
     const gpa = wasm.base.comp.gpa;
     const diags = &wasm.base.comp.link_diags;
@@ -170,8 +178,8 @@ fn parse(
     const version = std.mem.readInt(u32, bytes[pos..][0..4], .little);
     pos += 4;
 
-    const relocatable_data_start: u32 = @intCast(wasm.object_relocatable_datas.items.len);
-    const relocatable_custom_start: u32 = @intCast(wasm.object_relocatable_customs.items.len);
+    const data_segment_start: u32 = @intCast(wasm.object_data_segments.items.len);
+    const custom_segment_start: u32 = @intCast(wasm.object_custom_segments.items.len);
     const imports_start: u32 = @intCast(wasm.object_imports.items.len);
     const functions_start: u32 = @intCast(wasm.object_functions.items.len);
     const tables_start: u32 = @intCast(wasm.object_tables.items.len);
@@ -210,13 +218,13 @@ fn parse(
                     if (section_version != 2) return error.UnsupportedVersion;
                     while (pos < section_end) {
                         const sub_type, pos = readLeb(u8, bytes, pos);
-                        log.debug("found subsection: {s}", .{@tagName(@as(Wasm.SubsectionType, @enumFromInt(sub_type)))});
+                        log.debug("found subsection: {s}", .{@tagName(@as(SubsectionType, @enumFromInt(sub_type)))});
                         const payload_len, pos = readLeb(u32, bytes, pos);
                         if (payload_len == 0) break;
 
                         const count, pos = readLeb(u32, bytes, pos);
 
-                        switch (@as(Wasm.SubsectionType, @enumFromInt(sub_type))) {
+                        switch (@as(SubsectionType, @enumFromInt(sub_type))) {
                             .segment_info => {
                                 for (try ss.segment_info.addManyAsSlice(gpa, count)) |*segment| {
                                     const name, pos = readBytes(bytes, pos);
@@ -297,7 +305,7 @@ fn parse(
                                         .name = .none,
                                         .pointee = undefined,
                                     };
-                                    symbol.flags.clearZigSpecific(must_link);
+                                    symbol.flags.initZigSpecific(must_link, gc_sections);
 
                                     switch (tag) {
                                         .data => {
@@ -311,7 +319,7 @@ fn parse(
                                                 const size, pos = readLeb(u32, bytes, pos);
 
                                                 symbol.pointee = .{ .data = .{
-                                                    .index = @enumFromInt(relocatable_data_start + segment_index),
+                                                    .index = @enumFromInt(data_segment_start + segment_index),
                                                     .segment_offset = segment_offset,
                                                     .size = size,
                                                 } };
@@ -459,7 +467,7 @@ fn parse(
                     const data_off: u32 = @enumFromInt(wasm.string_bytes.items.len);
                     try wasm.string_bytes.appendSlice(gpa, debug_content);
 
-                    try wasm.object_relocatable_customs.put(gpa, section_index, .{
+                    try wasm.object_custom_segments.put(gpa, section_index, .{
                         .data_off = data_off,
                         .flags = .{
                             .data_len = @intCast(debug_content.len),
@@ -580,6 +588,9 @@ fn parse(
             },
             .@"export" => {
                 const exports_len, pos = readLeb(u32, bytes, pos);
+                // TODO: instead, read into scratch space, and then later
+                // add this data as if it were extra symbol table entries,
+                // but allow merging with existing symbol table data if the name matches.
                 for (try wasm.object_exports.addManyAsSlice(gpa, exports_len)) |*exp| {
                     const name, pos = readBytes(bytes, pos);
                     const kind: std.wasm.ExternalKind = @enumFromInt(bytes[pos]);
@@ -628,17 +639,21 @@ fn parse(
             .data => {
                 const start = pos;
                 const count, pos = readLeb(u32, bytes, pos);
-                for (try wasm.object_relocatable_datas.addManyAsSlice(gpa, count)) |*elem| {
-                    const memidx, pos = readLeb(u32, bytes, pos);
-                    if (memidx != 0) return diags.failParse(path, "data section uses mem index {d}", .{memidx});
-                    pos = skipInit(bytes, pos);
+                for (try wasm.object_data_segments.addManyAsSlice(gpa, count)) |*elem| {
+                    const flags, pos = readEnum(DataSegmentFlags, bytes, pos);
+                    if (flags == .active_memidx) {
+                        const memidx, pos = readLeb(u32, bytes, pos);
+                        if (memidx != 0) return diags.failParse(path, "data section uses mem index {d}", .{memidx});
+                    }
+                    //const expr, pos = if (flags != .passive) try readInit(wasm, bytes, pos) else .{ .none, pos };
+                    if (flags != .passive) pos = try skipInit(bytes, pos);
                     const data_len, pos = readLeb(u32, bytes, pos);
-                    const offset: u32 = @intCast(pos - start);
+                    const segment_offset: u32 = @intCast(pos - start);
                     const payload = try wasm.addRelocatableDataPayload(bytes[pos..][0..data_len]);
                     pos += data_len;
                     elem.* = .{
                         .payload = payload,
-                        .offset = offset,
+                        .segment_offset = segment_offset,
                         .section_index = section_index,
                         .name = .none, // Populated from symbol table
                         .flags = .{}, // Populated from symbol table and segment_info
@@ -772,15 +787,17 @@ fn parse(
         },
         .data => |data| {
             const ptr = data.ptr(wasm);
+            const is_passive = ptr.flags.is_passive;
             ptr.name = symbol.name;
             ptr.flags = symbol.flags;
+            ptr.flags.is_passive = is_passive;
             ptr.offset = data.segment_offset;
             ptr.size = data.size;
         },
     };
 
     // Apply segment_info.
-    for (wasm.relocatable_datas.items[relocatable_data_start..], ss.segment_info.items) |*data, info| {
+    for (wasm.object_data_segments.items[data_segment_start..], ss.segment_info.items) |*data, info| {
         data.name = info.name.toOptional();
         data.flags.strings = info.flags.strings;
         data.flags.tls = data.flags.tls or info.flags.tls;
@@ -865,13 +882,9 @@ fn parse(
             .off = comdats_start,
             .len = @intCast(wasm.object_comdats.items.len - comdats_start),
         },
-        .relocatable_data = .{
-            .off = relocatable_data_start,
-            .len = @intCast(wasm.object_relocatable_datas.items.len - relocatable_data_start),
-        },
-        .relocatable_custom = .{
-            .off = relocatable_custom_start,
-            .len = @intCast(wasm.object_relocatable_customs.items.len - relocatable_custom_start),
+        .custom_segments = .{
+            .off = custom_segment_start,
+            .len = @intCast(wasm.object_custom_segments.items.len - custom_segment_start),
         },
         .local_section_index_base = local_section_index_base,
     };

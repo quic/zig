@@ -150,6 +150,7 @@ pub fn parseObject(
     host_name: Wasm.String,
     scratch_space: *Object.ScratchSpace,
     must_link: bool,
+    gc_sections: bool,
 ) !Object {
     const header = mem.bytesAsValue(Header, file_contents[0..@sizeOf(Header)]);
     if (!mem.eql(u8, &header.fmag, ARFMAG)) return error.BadHeaderDelimiter;
@@ -167,7 +168,7 @@ pub fn parseObject(
     const object_file_size = try header.parsedSize();
     const contents = file_contents[@sizeOf(Header)..][0..object_file_size];
 
-    return Object.parse(wasm, contents, path, object_name, host_name, scratch_space, must_link);
+    return Object.parse(wasm, contents, path, object_name, host_name, scratch_space, must_link, gc_sections);
 }
 
 const Archive = @This();
